@@ -139,3 +139,40 @@ def auto_select_gpu(memory_threshold = 7000, smooth_ratio=200, strategy='greedy'
         cuda = np.argmin(gpu_memory_raw)
         print('GPU mem: {}, Select GPU {}'.format(gpu_memory_raw[cuda], cuda))
     return cuda
+
+# ==== export helpers (append to utils.py) ====
+from pathlib import Path
+import json, numpy as np
+try:
+    import joblib
+except Exception:
+    joblib = None
+
+def save_baseline_artifacts(out_dir, X_norm, mask, y=None, feature_names=None, scaler=None, split_idx=None):
+    out = Path(out_dir); out.mkdir(parents=True, exist_ok=True)
+    np.save(out / "X_norm.npy", X_norm)
+    np.save(out / "mask.npy",  mask.astype(np.uint8))   # 1=可見, 0=缺失
+    if y is not None: np.save(out / "y.npy", y)
+    if feature_names is not None:
+        (out / "feature_names.json").write_text(
+            json.dumps(list(map(str, feature_names)), ensure_ascii=False, indent=2), encoding="utf-8")
+    if scaler is not None and joblib is not None:
+        joblib.dump(scaler, out / "scaler.pkl")
+    if split_idx is not None:
+        (out / "split_idx.json").write_text(
+            json.dumps({k: list(map(int, v)) for k,v in split_idx.items()},
+                       ensure_ascii=False, indent=2), encoding="utf-8")
+
+def save_bipartite_edges(path, obs_idx, feat_idx, weight):
+    p = Path(path); p.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(p,
+        obs_idx=np.asarray(obs_idx, np.int64),
+        feat_idx=np.asarray(feat_idx, np.int64),
+        weight=np.asarray(weight,  np.float32))
+
+def save_omega_test(path, rows, cols):
+    p = Path(path); p.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(p,
+        rows=np.asarray(rows, np.int64),
+        cols=np.asarray(cols, np.int64))
+# ==== end export helpers ====

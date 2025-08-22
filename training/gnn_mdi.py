@@ -105,6 +105,61 @@ def train_gnn_mdi(data, args, log_path, device=torch.device('cpu')):
     obj = dict()
     obj['args'] = args
     obj['outputs'] = dict()
+
+    # === EXPORT (gnn_mdi) — place just before training loop ===
+    def _artifact_flags(args=None):
+        import os
+        art  = getattr(args, "artifact_dir", None) or os.getenv("GRAPT_ARTIFACT_DIR")
+        dump = getattr(args, "dump_intermediate", False) or (os.getenv("GRAPT_DUMP_INTERMEDIATE") == "1")
+        prep = getattr(args, "prep_only", False) or (os.getenv("GRAPT_PREP_ONLY") == "1")
+        return art, dump, prep
+
+    artifact_dir, dump_inter, prep_only = _artifact_flags(args if "args" in locals() else None)
+    if artifact_dir and dump_inter:
+        import os, numpy as np
+        from utils.utils import save_baseline_artifacts, save_bipartite_edges, save_omega_test
+
+        save_dir = os.path.join(args.artifact_dir, "baseline", args.data, f"seed{args.seed}")
+        n_row, n_col = data.df_X.shape
+
+        # (A) 由【訓練輸入邊】鋪 mask（優先 all_train_*，否則 train_*）
+        ei_train = all_train_edge_index if "all_train_edge_index" in locals() else train_edge_index
+        ea_train = all_train_edge_attr  if "all_train_edge_attr"  in locals() else train_edge_attr
+        ei = ei_train.detach().cpu().numpy()
+        r = ei[0].astype(np.int64)
+        c = (ei[1] - n_row).astype(np.int64)
+        ok = (r>=0)&(r<n_row)&(c>=0)&(c<n_col)
+        mask_np = np.zeros((n_row, n_col), dtype=np.uint8)
+        mask_np[r[ok], c[ok]] = 1
+
+        # (B) X：沿用 data.df_X
+        X_np = np.asarray(data.df_X, dtype=np.float32)
+
+        # (C) 二部圖（訓練可見邊）
+        if ea_train is not None:
+            w = ea_train.detach().cpu().numpy().astype(np.float32)
+            w = w[:r.shape[0]]
+        else:
+            w = np.ones(r.shape[0], dtype=np.float32)
+        save_bipartite_edges(os.path.join(save_dir, "bipartite_edges.npz"), r[ok], c[ok], w[ok])
+
+        # (D) Ω：由 test_edge_index 轉 row/col（固定為之後公平評估用）
+        te = test_edge_index.detach().cpu().numpy()
+        omega_rows = te[0].astype(np.int64)
+        omega_cols = (te[1] - n_row).astype(np.int64)
+        ok2 = (omega_rows>=0)&(omega_rows<n_row)&(omega_cols>=0)&(omega_cols<n_col)
+        save_omega_test(os.path.join(save_dir, "omega_test_idx.npz"), omega_rows[ok2], omega_cols[ok2])
+
+        # (E) 寫出 X/mask（impute 任務沒有 row 級 y）
+        save_baseline_artifacts(save_dir, X_np, mask_np, y=None,
+                                feature_names=getattr(data, "feature_names", None),
+                                scaler=None, split_idx=None)
+
+        if prep_only:
+            print("[prep_only] exported intermediates; exit before training.")
+            import sys; sys.exit(0)
+    # === END EXPORT (gnn_mdi) ===
+
     for epoch in range(args.epochs):
         model.train()
         impute_model.train()
@@ -227,6 +282,23 @@ def train_gnn_mdi(data, args, log_path, device=torch.device('cpu')):
     obj['outputs']['final_pred_test'] = pred_test
     obj['outputs']['label_test'] = label_test
     pickle.dump(obj, open(log_path + 'result.pkl', "wb"))
+
+    # --- for graft artifact
+    # 在 gnn_mdi.py 訓練末端（pickle.dump(obj, ...) 前後皆可）追加：
+    if (getattr(args, "artifact_dir", None) or os.getenv("GRAPT_ARTIFACT_DIR")) and \
+        (getattr(args, "dump_intermediate", False) or os.getenv("GRAPT_DUMP_INTERMEDIATE") == "1"):
+        out_dir = os.path.join(args.artifact_dir, "baseline", args.data, f"seed{args.seed}", "impute")
+        os.makedirs(out_dir, exist_ok=True)
+
+        import json
+        # 邊級預測與標籤（以 test 邊集合）
+        np.save(os.path.join(out_dir, "edge_pred.npy"),  pred_test.detach().cpu().numpy())
+        np.save(os.path.join(out_dir, "edge_label.npy"), label_test.detach().cpu().numpy())
+
+        # 指標：RMSE/MAE
+        with open(os.path.join(out_dir, "metrics.json"), "w") as f:
+            json.dump({"test": {"rmse": float(test_rmse), "mae": float(test_l1)}}, f)
+    # ---
 
     if args.save_model:
         torch.save(model, log_path + 'model.pt')

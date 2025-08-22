@@ -46,6 +46,16 @@ def main():
     parser.add_argument('--transfer_dir', type=str, default=None)
     parser.add_argument('--transfer_extra', type=str, default='')
     parser.add_argument('--mode', type=str, default='train') # debug
+
+    # --- for graft artifact
+    parser.add_argument("--artifact_dir", type=str, default=None,
+                        help="若提供，會把 X_norm/mask/splits 等中介輸出到此資料夾下 baseline/<data>/seed<seed>")
+    parser.add_argument("--dump_intermediate", action="store_true",
+                        help="開啟後在資料前處理完成（訓練前）輸出中介檔")
+    parser.add_argument("--prep_only", action="store_true",
+                        help="僅做前處理與輸出，然後直接退出（不進入訓練迴圈）")
+    # ---
+
     subparsers = parser.add_subparsers()
     add_uci_subparser(subparsers)
     add_mc_subparser(subparsers)
