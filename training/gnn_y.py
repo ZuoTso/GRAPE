@@ -134,6 +134,104 @@ def train_gnn_y(data, args, log_path, device=torch.device('cpu')):
             import sys; sys.exit(0)
     # === END EXPORT (gnn_y) ===
 
+    # === Paste into gnn_y.py — 放在 `# === END EXPORT (gnn_y) ===` 之後、訓練迴圈前 ===
+    # 目的（嚴格模式）：
+    # 1) **必須**由 orchestrator 提供 manifest（GRAFT_OVERLAY_MANIFEST），且 **必須指定 masks 串接方式**。
+    # 2) 若未指定 `mask_op`（AND/OR）、未提供 `masks`、或形狀不符，**立即報錯**，避免誤吃到舊檔。
+    # 3) 按指定順序載入 masks（manifest.masks），依 `mask_op` 疊合，並可疊加 edge_keep_*。
+    # 4) 僅過濾訓練邊與監督 row（軟刪）。硬刪位以 TODO[HARD_PRUNE] 註記。
+
+    try:
+        import os, sys, json, numpy as np
+
+        man_path = os.getenv("GRAFT_OVERLAY_MANIFEST", "")
+        if not man_path or not os.path.exists(man_path):
+            raise RuntimeError("[FATAL gnn_y] Missing GRAFT_OVERLAY_MANIFEST (manifest not found). Orchestrator must specify it.")
+
+        try:
+            man = json.load(open(man_path, "r", encoding="utf-8"))
+        except Exception as _e:
+            raise RuntimeError(f"[FATAL gnn_y] Cannot parse manifest: {man_path}: {_e}")
+
+        masks_paths = man.get("masks", [])
+        edge_keep_paths = man.get("edge_keeps", [])
+        order = man.get("order", None)
+        # 串接方式：允許 env 覆寫，否則取 manifest.mask_op；**缺少就報錯**
+        mask_op = os.getenv("GRAFT_MASK_OP", "").strip().upper() or str(man.get("mask_op", "")).strip().upper()
+        if not masks_paths:
+            raise RuntimeError("[FATAL gnn_y] overlay manifest has no 'masks'. Please list masks in order to compose.")
+        if mask_op not in {"AND", "OR"}:
+            raise RuntimeError("[FATAL gnn_y] mask_op not specified or invalid. Set manifest.mask_op or env GRAFT_MASK_OP to 'AND' or 'OR'.")
+        if order is None:
+            raise RuntimeError("[FATAL gnn_y] overlay manifest missing 'order'. Orchestrator must record module order (e.g., 't2g>lunar>grape').")
+
+        n_row, n_col = data.df_X.shape
+
+        # 疊 mask（按 manifest.masks 順序；op=AND/OR）
+        M = None
+        for p in masks_paths:
+            try:
+                m = np.load(p)
+            except Exception as _e:
+                raise RuntimeError(f"[FATAL gnn_y] cannot load mask: {p}: {_e}")
+            if m.shape != (n_row, n_col):
+                raise RuntimeError(f"[FATAL gnn_y] mask shape mismatch: {p} has {m.shape}, expected {(n_row, n_col)}")
+            m = m.astype(np.uint8)
+            if M is None:
+                M = m
+            else:
+                M = (M & m) if mask_op == "AND" else (M | m)
+
+        # 1) 過濾訓練邊（只動 train_*，不動測試集合）
+        ei = train_edge_index.detach().cpu().numpy()  # 2 x E
+        keep = np.ones(ei.shape[1], dtype=bool)
+        for j in range(ei.shape[1]):
+            u = int(ei[0, j]); v = int(ei[1, j])
+            if (u < n_row) ^ (v < n_row):
+                r = u if u < n_row else v
+                c = v - n_row if u < n_row else u - n_row
+                if r >= n_row or c >= n_col or M[r, c] == 0:
+                    keep[j] = False
+
+        # 疊 edge_keep_*（若 manifest 指定；固定 AND 疊加；若要自定 op 可新增 edge_keep_op）
+        if edge_keep_paths:
+            k_all = None
+            for kp in edge_keep_paths:
+                if not os.path.exists(kp):
+                    raise RuntimeError(f"[FATAL gnn_y] edge_keep file not found: {kp}")
+                kv = np.load(kp).astype(bool)
+                if kv.size != keep.size:
+                    raise RuntimeError(f"[FATAL gnn_y] edge_keep size mismatch: {kp} ({kv.size} != {keep.size})")
+                k_all = kv if k_all is None else (k_all & kv)
+            keep &= k_all
+
+        if (~keep).any():
+            keep_t = torch.as_tensor(keep, device=train_edge_index.device)
+            train_edge_index = train_edge_index[:, keep_t]
+            if train_edge_attr is not None:
+                train_edge_attr = train_edge_attr[keep_t]
+
+        # 2) 過濾監督 row（排除任何欄位都不可見的樣本）
+        row_keep_np = M.any(axis=1)
+        row_keep = torch.as_tensor(row_keep_np, device=all_train_y_mask.device)
+        all_train_y_mask = all_train_y_mask & row_keep
+        test_y_mask      = test_y_mask      & row_keep
+        if getattr(args, 'valid', 0.) > 0.:
+            train_y_mask = train_y_mask & row_keep
+            valid_y_mask = valid_y_mask & row_keep
+
+        print(f"[IMPORT] gnn_y: mask_op={mask_op}; edges kept {int(keep.sum())}/{keep.size}; rows kept {int(row_keep_np.sum())}/{n_row}; order={order}")
+
+        # ========================== 硬刪（未來擴充位） ==========================
+        # TODO[HARD_PRUNE]: 建議由 orchestrator 的 finalize 階段先物化縮小版（X/mask/edges），
+        # 並輸出 kept_rows/kept_cols；若要在此硬刪，需進行 reindex 與評估索引校驗。
+        # ======================================================================
+
+    except Exception as e:
+        # 直接拋出以中止本次訓練，防止吃到錯誤組合
+        raise
+    # === END Paste into gnn_y.py — 放在 `# === END EXPORT (gnn_y) ===` 之後、訓練迴圈前 ===
+
     for epoch in range(args.epochs):
         model.train()
         impute_model.train()

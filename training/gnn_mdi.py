@@ -8,6 +8,20 @@ from models.prediction_model import MLPNet
 from utils.plot_utils import plot_curve, plot_sample
 from utils.utils import build_optimizer, objectview, get_known_mask, mask_edge
 
+# ===
+def to_numpy(x):
+    import numpy as np
+    try:
+        import torch
+        if torch.is_tensor(x):
+            return x.detach().cpu().numpy()
+    except Exception:
+        pass
+    if isinstance(x, np.ndarray):
+        return x
+    return np.asarray(x)
+# ===
+
 def train_gnn_mdi(data, args, log_path, device=torch.device('cpu')):
     model = get_gnn(data, args).to(device)
     if args.impute_hiddens == '':
@@ -160,6 +174,89 @@ def train_gnn_mdi(data, args, log_path, device=torch.device('cpu')):
             import sys; sys.exit(0)
     # === END EXPORT (gnn_mdi) ===
 
+    # === Paste into gnn_mdi.py — 放在 `# === END EXPORT (gnn_mdi) ===` 之後、訓練前 ===
+    # 嚴格模式與 gnn_y 同；差異在於不需要 row 過濾（僅過濾訓練邊）。
+
+    try:
+        import os, sys, json, numpy as np
+
+        man_path = os.getenv("GRAFT_OVERLAY_MANIFEST", "")
+        if not man_path or not os.path.exists(man_path):
+            raise RuntimeError("[FATAL gnn_mdi] Missing GRAFT_OVERLAY_MANIFEST (manifest not found). Orchestrator must specify it.")
+
+        try:
+            man = json.load(open(man_path, "r", encoding="utf-8"))
+        except Exception as _e:
+            raise RuntimeError(f"[FATAL gnn_mdi] Cannot parse manifest: {man_path}: {_e}")
+
+        masks_paths = man.get("masks", [])
+        edge_keep_paths = man.get("edge_keeps", [])
+        order = man.get("order", None)
+        mask_op = os.getenv("GRAFT_MASK_OP", "").strip().upper() or str(man.get("mask_op", "")).strip().upper()
+        if not masks_paths:
+            raise RuntimeError("[FATAL gnn_mdi] overlay manifest has no 'masks'. Please list masks in order to compose.")
+        if mask_op not in {"AND", "OR"}:
+            raise RuntimeError("[FATAL gnn_mdi] mask_op not specified or invalid. Set manifest.mask_op or env GRAFT_MASK_OP to 'AND' or 'OR'.")
+        if order is None:
+            raise RuntimeError("[FATAL gnn_mdi] overlay manifest missing 'order'. Orchestrator must record module order (e.g., 't2g>lunar>grape').")
+
+        n_row, n_col = data.df_X.shape
+
+        M = None
+        for p in masks_paths:
+            try:
+                m = np.load(p)
+            except Exception as _e:
+                raise RuntimeError(f"[FATAL gnn_mdi] cannot load mask: {p}: {_e}")
+            if m.shape != (n_row, n_col):
+                raise RuntimeError(f"[FATAL gnn_mdi] mask shape mismatch: {p} has {m.shape}, expected {(n_row, n_col)}")
+            m = m.astype(np.uint8)
+            if M is None:
+                M = m
+            else:
+                M = (M & m) if mask_op == "AND" else (M | m)
+
+        ei = train_edge_index.detach().cpu().numpy()
+        keep = np.ones(ei.shape[1], dtype=bool)
+        for j in range(ei.shape[1]):
+            u = int(ei[0, j]); v = int(ei[1, j])
+            if (u < n_row) ^ (v < n_row):
+                r = u if u < n_row else v
+                c = v - n_row if u < n_row else u - n_row
+                if r >= n_row or c >= n_col or M[r, c] == 0:
+                    keep[j] = False
+
+        if edge_keep_paths:
+            k_all = None
+            for kp in edge_keep_paths:
+                if not os.path.exists(kp):
+                    raise RuntimeError(f"[FATAL gnn_mdi] edge_keep file not found: {kp}")
+                kv = np.load(kp).astype(bool)
+                if kv.size != keep.size:
+                    raise RuntimeError(f"[FATAL gnn_mdi] edge_keep size mismatch: {kp} ({kv.size} != {keep.size})")
+                k_all = kv if k_all is None else (k_all & kv)
+            keep &= k_all
+
+        if (~keep).any():
+            keep_t = torch.as_tensor(keep, device=train_edge_index.device)
+            train_edge_index = train_edge_index[:, keep_t]
+            train_edge_attr  = train_edge_attr[keep_t]
+            if 'test_input_edge_index' in locals() and test_input_edge_index.shape[1] == ei.shape[1]:
+                test_input_edge_index = test_input_edge_index[:, keep_t]
+                test_input_edge_attr  = test_input_edge_attr[keep_t]
+
+        print(f"[IMPORT] gnn_mdi: mask_op={mask_op}; edges kept {int(keep.sum())}/{keep.size}; order={order}")
+
+        # ========================== 硬刪（未來擴充位） ==========================
+        # TODO[HARD_PRUNE]: 建議 orchestrator 先物化縮小版（X/mask/edges + kept_rows/kept_cols），
+        # 本檔只讀縮小資料。若強行在此硬刪，需 reindex 訓練/驗證切分並重建邊，並校驗 omega_test 一致性。
+        # ======================================================================
+
+    except Exception as e:
+        # 直接拋出以中止本次訓練
+        raise
+    # === END Paste into gnn_mdi.py — 放在 `# === END EXPORT (gnn_mdi) ===` 之後、訓練前 ===
+
     for epoch in range(args.epochs):
         model.train()
         impute_model.train()
@@ -292,8 +389,8 @@ def train_gnn_mdi(data, args, log_path, device=torch.device('cpu')):
 
         import json
         # 邊級預測與標籤（以 test 邊集合）
-        np.save(os.path.join(out_dir, "edge_pred.npy"),  pred_test.detach().cpu().numpy())
-        np.save(os.path.join(out_dir, "edge_label.npy"), label_test.detach().cpu().numpy())
+        np.save(os.path.join(out_dir, "edge_pred.npy"),  to_numpy(pred_test))
+        np.save(os.path.join(out_dir, "edge_label.npy"), to_numpy(label_test))
 
         # 指標：RMSE/MAE
         with open(os.path.join(out_dir, "metrics.json"), "w") as f:
