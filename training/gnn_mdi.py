@@ -244,6 +244,14 @@ def train_gnn_mdi(data, args, log_path, device=torch.device('cpu')):
             if 'test_input_edge_index' in locals() and test_input_edge_index.shape[1] == ei.shape[1]:
                 test_input_edge_index = test_input_edge_index[:, keep_t]
                 test_input_edge_attr  = test_input_edge_attr[keep_t]
+            
+            # >>> 這裡立刻補上對 labels 的同步過濾 <<<
+            half = ei.shape[1] // 2
+            keep_single = keep[:half]
+            if isinstance(train_labels, torch.Tensor):
+                train_labels = train_labels[torch.as_tensor(keep_single, device=train_labels.device)]
+            else:
+                train_labels = train_labels[keep_single]
 
         print(f"[IMPORT] gnn_mdi: mask_op={mask_op}; edges kept {int(keep.sum())}/{keep.size}; order={order}")
 
