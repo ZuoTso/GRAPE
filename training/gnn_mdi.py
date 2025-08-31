@@ -202,19 +202,67 @@ def train_gnn_mdi(data, args, log_path, device=torch.device('cpu')):
 
         n_row, n_col = data.df_X.shape
 
+        from pathlib import Path
+        import numpy as np
+        import os
+
+        def _infer_stage_from_path(p: str) -> str:
+            name = Path(p).name
+            if name == "mask.npy": return "baseline"
+            if "mask_lunar" in name: return "lunar"
+            if "mask_t2g" in name: return "t2g"
+            if "mask_random" in name: return "random"
+            return name  # fallback
+
+        def _mask_stats(m: np.ndarray):
+            ones = int(m.sum(dtype=np.int64))
+            total = m.size
+            cov = ones / total if total else 0.0
+            row_keep = int(m.any(axis=1).sum())
+            col_keep = int(m.any(axis=0).sum())
+            return ones, cov, row_keep, col_keep
+
+        DEBUG_MASK = os.getenv("GRAFT_DEBUG_MASK", "1") == "1"  # 想靜音就設 0
+
+        if DEBUG_MASK:
+            print(f"[overlay] mask_op={mask_op} | total_masks={len(masks_paths)} | "
+                f"n_row={n_row}, n_col={n_col}")
+            try:
+                # 有的程式段會在上面讀過 manifest 的 'order'
+                print(f"[overlay] order={order}")
+            except NameError:
+                pass
+
         M = None
-        for p in masks_paths:
+        for i, p in enumerate(masks_paths, 1):
             try:
                 m = np.load(p)
             except Exception as _e:
-                raise RuntimeError(f"[FATAL gnn_mdi] cannot load mask: {p}: {_e}")
+                raise RuntimeError(f"[FATAL gnn_y] cannot load mask: {p}: {_e}")
             if m.shape != (n_row, n_col):
-                raise RuntimeError(f"[FATAL gnn_mdi] mask shape mismatch: {p} has {m.shape}, expected {(n_row, n_col)}")
+                raise RuntimeError(f"[FATAL gnn_y] mask shape mismatch: {p} has {m.shape}, expected {(n_row, n_col)}")
             m = m.astype(np.uint8)
+            stage = _infer_stage_from_path(p)
+
+            if DEBUG_MASK:
+                ones, cov, r_keep, c_keep = _mask_stats(m)
+                print(f"[overlay:{i}] stage={stage:<8} op={mask_op:<3} path={p}")
+                print(f"    current m: ones={ones} ({cov:.2%}) | rows_keep={r_keep}/{n_row} | cols_keep={c_keep}/{n_col}")
+
             if M is None:
                 M = m
+                if DEBUG_MASK:
+                    onesA, covA, rA, cA = _mask_stats(M)
+                    print(f"    init   M: ones={onesA} ({covA:.2%}) | rows_keep={rA}/{n_row} | cols_keep={cA}/{n_col}")
             else:
+                onesB, covB, rB, cB = _mask_stats(M)
                 M = (M & m) if mask_op == "AND" else (M | m)
+                onesC, covC, rC, cC = _mask_stats(M)
+                if DEBUG_MASK:
+                    op_sym = "&" if mask_op == "AND" else "|"
+                    print(f"    merge  M: prev_ones={onesB} ({covB:.2%}) {op_sym} current -> "
+                        f"after_ones={onesC} ({covC:.2%}) | Δones={onesC - onesB:+d}, "
+                        f"Δrows={rC - rB:+d}, Δcols={cC - cB:+d}")
 
         ei = train_edge_index.detach().cpu().numpy()
         keep = np.ones(ei.shape[1], dtype=bool)
