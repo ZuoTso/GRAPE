@@ -11,6 +11,7 @@ import pandas as pd
 from training.gnn_y import train_gnn_y
 from uci.uci_subparser import add_uci_subparser
 from utils.utils import auto_select_gpu
+from pack.pack_subparser import add_pack_subparser # ← New
 
 def main():
     parser = argparse.ArgumentParser()
@@ -51,6 +52,7 @@ def main():
     
     subparsers = parser.add_subparsers()
     add_uci_subparser(subparsers)
+    add_pack_subparser(subparsers) # ← New
     args = parser.parse_args()
     print(args)
 
@@ -71,6 +73,9 @@ def main():
 
     if args.domain == 'uci':
         from uci.uci_data import load_data
+        data = load_data(args)
+    elif args.domain == 'pack': # ← New
+        from pack.pack_data import load_data
         data = load_data(args)
 
     log_path = './{}/test/{}/{}/'.format(args.domain,args.data,args.log_dir)

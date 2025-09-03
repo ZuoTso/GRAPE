@@ -295,8 +295,18 @@ def train_gnn_y(data, args, log_path, device=torch.device('cpu')):
 
         opt.zero_grad()
         x_embd = model(x, known_edge_attr, known_edge_index)
-        X = impute_model([x_embd[edge_index[0, :int(n_row * n_col)]], x_embd[edge_index[1, :int(n_row * n_col)]]])
-        X = torch.reshape(X, [n_row, n_col])
+        # ================================== pack ====================================
+        if getattr(args, "domain", "uci") == "pack":
+            # 產生 rows×cols 的網格索引（row 節點是 [0..n_row-1]，col 節點是 [n_row..n_row+n_col-1]）
+            row_idx = torch.arange(n_row, device=device).repeat_interleave(n_col)
+            col_idx = (torch.arange(n_col, device=device) + n_row).repeat(n_row)
+            X = impute_model([x_embd[row_idx], x_embd[col_idx]])
+            X = X.view(n_row, n_col)
+        else:
+        # ================================== pack ====================================
+            X = impute_model([x_embd[edge_index[0, :int(n_row * n_col)]], x_embd[edge_index[1, :int(n_row * n_col)]]])
+            X = torch.reshape(X, [n_row, n_col])
+
         pred = predict_model(X)[:, 0]
         pred_train = pred[train_y_mask]
         label_train = y[train_y_mask]
@@ -316,8 +326,17 @@ def train_gnn_y(data, args, log_path, device=torch.device('cpu')):
         with torch.no_grad():
             if args.valid > 0.:
                 x_embd = model(x, train_edge_attr, train_edge_index)
-                X = impute_model([x_embd[edge_index[0, :int(n_row * n_col)]], x_embd[edge_index[1, :int(n_row * n_col)]]])
-                X = torch.reshape(X, [n_row, n_col])
+                # ================================== pack ====================================
+                if getattr(args, "domain", "uci") == "pack":
+                    # 產生 rows×cols 的網格索引（row 節點是 [0..n_row-1]，col 節點是 [n_row..n_row+n_col-1]）
+                    row_idx = torch.arange(n_row, device=device).repeat_interleave(n_col)
+                    col_idx = (torch.arange(n_col, device=device) + n_row).repeat(n_row)
+                    X = impute_model([x_embd[row_idx], x_embd[col_idx]])
+                    X = X.view(n_row, n_col)
+                else:
+                # ================================== pack ====================================
+                    X = impute_model([x_embd[edge_index[0, :int(n_row * n_col)]], x_embd[edge_index[1, :int(n_row * n_col)]]])
+                    X = torch.reshape(X, [n_row, n_col])
                 pred = predict_model(X)[:, 0]
                 pred_valid = pred[valid_y_mask]
                 label_valid = y[valid_y_mask]
@@ -341,8 +360,17 @@ def train_gnn_y(data, args, log_path, device=torch.device('cpu')):
                 Valid_l1.append(valid_l1)
 
             x_embd = model(x, train_edge_attr, train_edge_index)
-            X = impute_model([x_embd[edge_index[0, :int(n_row * n_col)]], x_embd[edge_index[1, :int(n_row * n_col)]]])
-            X = torch.reshape(X, [n_row, n_col])
+            # ================================== pack ====================================
+            if getattr(args, "domain", "uci") == "pack":
+                # 產生 rows×cols 的網格索引（row 節點是 [0..n_row-1]，col 節點是 [n_row..n_row+n_col-1]）
+                row_idx = torch.arange(n_row, device=device).repeat_interleave(n_col)
+                col_idx = (torch.arange(n_col, device=device) + n_row).repeat(n_row)
+                X = impute_model([x_embd[row_idx], x_embd[col_idx]])
+                X = X.view(n_row, n_col)
+            else:
+            # ================================== pack ====================================
+                X = impute_model([x_embd[edge_index[0, :int(n_row * n_col)]], x_embd[edge_index[1, :int(n_row * n_col)]]])
+                X = torch.reshape(X, [n_row, n_col])
             pred = predict_model(X)[:, 0]
             pred_test = pred[test_y_mask]
             label_test = y[test_y_mask]
